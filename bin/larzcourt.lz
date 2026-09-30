@@ -1,0 +1,144 @@
+#!/usr/bin/env larzscript
+# larzcourt - CLI for the staked-jury dispute resolution in lib/court.lz.
+#
+#   larzcourt fund juror1 100
+#   larzcourt create-case "Refund dispute" "did the item ship?" --period=3600
+#   larzcourt join <case_id> juror1 20
+#   larzcourt vote <case_id> juror1 plaintiff
+#   larzcourt resolve <case_id>
+#   larzcourt show <case_id>
+#
+# --board=path overrides the default ./board.json
+
+import "../lib/vendor/args.lz" as argparse
+import "../lib/vendor/table.lz" as table
+import "../lib/court.lz" as court
+
+let VERSION = "0.1.0"
+
+let USAGE = "larzcourt " + VERSION + " - staked-jury dispute resolution, backed by real wallet/pay/escrow\n" +
+  "\n" +
+  "usage:\n" +
+  "  larzcourt fund <name> <amount>\n" +
+  "  larzcourt create-case <title> <description> --period=<secs>\n" +
+  "  larzcourt join <case_id> <juror> <stake>\n" +
+  "  larzcourt vote <case_id> <juror> <plaintiff|defendant>\n" +
+  "  larzcourt resolve <case_id>\n" +
+  "  larzcourt list\n" +
+  "  larzcourt show <case_id>\n" +
+  "  larzcourt balance <name>\n" +
+  "\n" +
+  "options:\n" +
+  "  --board=<path>   board file to read/write (default: ./board.json)\n"
+
+fn fail(msg) { print("error: " + msg); exit(1) }
+fn short(id) { return id[0:8] }
+
+fn _find_by_prefix(board, prefix) {
+  if len(prefix) < 4 { return nil }
+  for id in keys(board["cases"]) {
+    if id.starts_with(prefix) { return id }
+  }
+  return nil
+}
+
+fn cmd_fund(board, positional) {
+  if len(positional) < 2 { fail("fund needs <name> <amount>") }
+  let name = positional[0]
+  let amount = float(positional[1])
+  court.fund(board, name, amount)
+  print(name + " balance is now $" + str(court.balance(board, name)))
+}
+
+fn cmd_create_case(board, positional, parsed) {
+  if len(positional) < 2 { fail("create-case needs <title> <description>") }
+  let period_flag = argparse.flag(parsed, "period")
+  if period_flag == nil { fail("create-case needs --period=<secs>") }
+  let id = court.create_case(board, positional[0], positional[1], float(period_flag))
+  print("case " + short(id) + "  \"" + positional[0] + "\"  open for " + period_flag + "s")
+  print("full id: " + id)
+}
+
+fn cmd_join(board, positional) {
+  if len(positional) < 3 { fail("join needs <case_id> <juror> <stake>") }
+  let id = _find_by_prefix(board, positional[0])
+  if id == nil { fail("no case matching id " + positional[0]) }
+  let r = court.join(board, id, positional[1], float(positional[2]))
+  if not r["ok"] { fail(r["error"]) }
+  print(positional[1] + " joined as juror, staked $" + positional[2])
+}
+
+fn cmd_vote(board, positional) {
+  if len(positional) < 3 { fail("vote needs <case_id> <juror> <plaintiff|defendant>") }
+  let id = _find_by_prefix(board, positional[0])
+  if id == nil { fail("no case matching id " + positional[0]) }
+  let r = court.vote(board, id, positional[1], positional[2])
+  if not r["ok"] { fail(r["error"]) }
+  print(positional[1] + " voted " + positional[2])
+}
+
+fn cmd_resolve(board, positional) {
+  if len(positional) < 1 { fail("resolve needs <case_id>") }
+  let id = _find_by_prefix(board, positional[0])
+  if id == nil { fail("no case matching id " + positional[0]) }
+  let r = court.resolve(board, id)
+  if not r["ok"] { fail(r["error"]) }
+  print("ruling: " + r["ruling"])
+}
+
+fn cmd_list(board) {
+  let cases = court.list_cases(board)
+  if len(cases) == 0 { print("no cases"); return }
+  let rows = [["id", "title", "jurors", "status", "ruling"]]
+  for c in cases {
+    rows.push([short(c["id"]), c["title"], str(len(c["jurors"])), c["status"], c["ruling"] == nil ? "-" : c["ruling"]])
+  }
+  print(table.render(rows))
+}
+
+fn cmd_show(board, positional) {
+  if len(positional) < 1 { fail("show needs <case_id>") }
+  let id = _find_by_prefix(board, positional[0])
+  if id == nil { fail("no case matching id " + positional[0]) }
+  let c = court.get_case(board, id)
+  print("id:          " + c["id"])
+  print("title:       " + c["title"])
+  print("description: " + c["description"])
+  print("status:      " + c["status"])
+  print("ruling:      " + (c["ruling"] == nil ? "-" : c["ruling"]))
+  print("jurors:")
+  for j in keys(c["jurors"]) {
+    let jr = c["jurors"][j]
+    print("  - " + j + "  staked $" + str(jr["stake"]) + "  voted " + (jr["vote"] == nil ? "(no vote)" : jr["vote"]))
+  }
+}
+
+fn cmd_balance(board, positional) {
+  if len(positional) < 1 { fail("balance needs <name>") }
+  print(positional[0] + ": $" + str(court.balance(board, positional[0])))
+}
+
+fn main() {
+  let parsed = argparse.parse(args)
+  let positional = parsed["positional"]
+  if len(positional) < 1 { print(USAGE); exit(1) }
+  let command = positional[0]
+  let rest = positional[1:]
+  let board_path = argparse.flag(parsed, "board", "board.json")
+  let board = court.load(board_path)
+
+  if command == "fund" { cmd_fund(board, rest) }
+  else if command == "create-case" { cmd_create_case(board, rest, parsed) }
+  else if command == "join" { cmd_join(board, rest) }
+  else if command == "vote" { cmd_vote(board, rest) }
+  else if command == "resolve" { cmd_resolve(board, rest) }
+  else if command == "list" { cmd_list(board) }
+  else if command == "show" { cmd_show(board, rest) }
+  else if command == "balance" { cmd_balance(board, rest) }
+  else if command == "help" or command == "--help" or command == "-h" { print(USAGE); exit(0) }
+  else { fail("unknown command \"" + command + "\" - see: larzcourt help") }
+
+  court.save(board, board_path)
+}
+
+main()

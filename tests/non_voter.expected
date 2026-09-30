@@ -1,0 +1,11 @@
+alice balance is now $100
+bob balance is now $100
+case xxxxxxxx  "Late delivery dispute"  open for 5s
+full id: UUID
+alice joined as juror, staked $10
+bob joined as juror, staked $10
+alice voted plaintiff
+--- bob never votes ---
+ruling: plaintiff
+alice: $110
+bob: $90

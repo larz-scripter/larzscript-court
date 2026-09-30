@@ -1,0 +1,11 @@
+alice balance is now $100
+bob balance is now $100
+case xxxxxxxx  "Ambiguous contract dispute"  open for 5s
+full id: UUID
+alice joined as juror, staked $15
+bob joined as juror, staked $15
+alice voted plaintiff
+bob voted defendant
+ruling: tie - all stakes refunded
+alice: $100
+bob: $100

@@ -1,0 +1,13 @@
+alice balance is now $100
+case xxxxxxxx  "Case one"  open for 5s
+full id: UUID
+case xxxxxxxx  "Case two"  open for 5s
+full id: UUID
+--- a 3-char prefix is rejected outright, even if it happens to match ---
+error: no case matching id abc
+--- an unjoined juror can't vote ---
+error: not a juror on this case - join first with a stake
+--- resolving before the deadline is refused ---
+alice joined as juror, staked $10
+alice voted plaintiff
+error: voting period hasn't ended yet

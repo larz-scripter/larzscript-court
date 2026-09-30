@@ -1,0 +1,15 @@
+alice balance is now $100
+bob balance is now $100
+carol balance is now $100
+case xxxxxxxx  "Refund dispute"  open for 5s
+full id: UUID
+alice joined as juror, staked $20
+bob joined as juror, staked $30
+carol joined as juror, staked $10
+alice voted plaintiff
+bob voted plaintiff
+carol voted defendant
+ruling: plaintiff
+alice: $104
+bob: $106
+carol: $90

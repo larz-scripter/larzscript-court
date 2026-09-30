@@ -1,0 +1,177 @@
+# court - staked-jury dispute resolution (a Schelling-point mechanism,
+# the same shape Kleros and similar decentralized courts use), backed
+# by real wallet/pay/escrow. Jurors put their OWN money on the line to
+# participate, not the parties to the dispute - that stake is what
+# makes honest voting incentive-compatible: a juror who votes with the
+# eventual majority gets their stake back plus a share of what the
+# minority lost; a juror who votes against the majority (or doesn't
+# vote at all) has their stake redistributed to the majority instead.
+#
+# Every sibling flagship project's require either allows or blocks ONE
+# transaction. This one is different again: after a vote, it determines
+# the DIRECTION of N separate payments at once - each juror's own money
+# either comes back to them (plus a bonus) or moves to someone else
+# entirely, decided purely by which side of the vote they landed on.
+#
+#   import "court" as court
+#   let b = court.load("board.json")
+#   court.fund(b, "juror1", 100.00)                         # demo-only faucet
+#   let id = court.create_case(b, "Refund dispute", "did the item ship?", 3600)
+#   court.join(b, id, "juror1", 20.00)
+#   court.vote(b, id, "juror1", "plaintiff")
+#   court.resolve(b, id)                                    # after the deadline
+#   court.save(b, "board.json")
+
+import "vendor/json.lz" as json
+import "vendor/escrow.lz" as escrow
+import "moneyx.lz" as moneyx
+import "vendor/uuid.lz" as uuid
+
+fn new_board() { return {"wallets": {}, "cases": {}} }
+
+fn load(path) {
+  if not file_exists(path) { return new_board() }
+  return json.parse(read_file(path))
+}
+
+fn save(board, path) { write_file(path, json.pretty(board)) }
+
+fn balance(board, name) { return board["wallets"].has(name) ? board["wallets"][name] : 0.0 }
+fn _set_balance(board, name, f) { board["wallets"][name] = f }
+
+# Demo-only faucet - see the sibling flagship projects' own README
+# precedent for why this exists and isn't a real payment rail.
+fn fund(board, name, amount) { _set_balance(board, name, balance(board, name) + amount) }
+
+fn create_case(board, title, description, voting_period_secs) {
+  let id = uuid.v4()
+  board["cases"][id] = {
+    "id": id, "title": title, "description": description,
+    "deadline": time() + voting_period_secs, "status": "voting",
+    "jurors": {}, "holding_balance": 0.0, "ruling": nil, "created_at": time()
+  }
+  return id
+}
+
+fn get_case(board, id) { return board["cases"].has(id) ? board["cases"][id] : nil }
+fn list_cases(board) {
+  let out = []
+  for id in keys(board["cases"]) { out.push(board["cases"][id]) }
+  return out
+}
+
+# Staking IS registering - there's no separate "sign up" step. Real
+# money, moved into the case's shared holding wallet the instant a
+# juror joins, exactly like every other escrow-based project in this
+# series.
+fn join(board, case_id, juror, stake) {
+  let c = get_case(board, case_id)
+  if c == nil { return {"ok": false, "error": "no such case"} }
+  if c["status"] != "voting" { return {"ok": false, "error": "case is " + c["status"] + ", not accepting jurors"} }
+  if c["jurors"].has(juror) { return {"ok": false, "error": "already a juror on this case"} }
+
+  wallet juror_w = moneyx.of(balance(board, juror))
+  wallet holding
+  try {
+    escrow.open(moneyx.of(stake), juror_w, holding)
+  } catch e {
+    return {"ok": false, "error": e["message"]}
+  }
+  _set_balance(board, juror, moneyx.to_float(juror_w.balance))
+  c["holding_balance"] = c["holding_balance"] + moneyx.to_float(holding.balance)
+  c["jurors"][juror] = {"stake": stake, "vote": nil}
+  return {"ok": true}
+}
+
+fn vote(board, case_id, juror, choice) {
+  let c = get_case(board, case_id)
+  if c == nil { return {"ok": false, "error": "no such case"} }
+  if c["status"] != "voting" { return {"ok": false, "error": "case is " + c["status"] + ", not open for voting"} }
+  if time() >= c["deadline"] { return {"ok": false, "error": "voting period has ended"} }
+  if not c["jurors"].has(juror) { return {"ok": false, "error": "not a juror on this case - join first with a stake"} }
+  if choice != "plaintiff" and choice != "defendant" { return {"ok": false, "error": "choice must be plaintiff or defendant"} }
+  c["jurors"][juror]["vote"] = choice
+  return {"ok": true}
+}
+
+# Settles a case after its voting period ends. A juror who voted with
+# the eventual majority gets their own stake back plus a proportional
+# share of everything the minority side lost; a juror who voted the
+# other way - or never voted at all, the same real Kleros-style
+# non-participation penalty - has their stake redistributed instead and
+# gets nothing back. A tie refunds everyone in full; there's no
+# majority to reward or minority to slash.
+fn resolve(board, case_id) {
+  let c = get_case(board, case_id)
+  if c == nil { return {"ok": false, "error": "no such case"} }
+  if c["status"] != "voting" { return {"ok": false, "error": "case is " + c["status"] + ", already resolved"} }
+  if time() < c["deadline"] { return {"ok": false, "error": "voting period hasn't ended yet"} }
+
+  let plaintiff_count = 0
+  let defendant_count = 0
+  for j in keys(c["jurors"]) {
+    let v = c["jurors"][j]["vote"]
+    if v == "plaintiff" { plaintiff_count = plaintiff_count + 1 }
+    else if v == "defendant" { defendant_count = defendant_count + 1 }
+  }
+
+  if plaintiff_count == defendant_count {
+    for j in keys(c["jurors"]) {
+      let stake = c["jurors"][j]["stake"]
+      wallet holding = moneyx.of(c["holding_balance"])
+      wallet juror_w = moneyx.of(balance(board, j))
+      escrow.refund(moneyx.of(stake), holding, juror_w)
+      c["holding_balance"] = moneyx.to_float(holding.balance)
+      _set_balance(board, j, moneyx.to_float(juror_w.balance))
+    }
+    c["status"] = "resolved"
+    c["ruling"] = "tie - all stakes refunded"
+    return {"ok": true, "ruling": c["ruling"]}
+  }
+
+  let majority_side = plaintiff_count > defendant_count ? "plaintiff" : "defendant"
+
+  let slashed_pool = 0.0
+  let majority_total_stake = 0.0
+  for j in keys(c["jurors"]) {
+    let jr = c["jurors"][j]
+    if jr["vote"] == majority_side { majority_total_stake = majority_total_stake + jr["stake"] }
+    else { slashed_pool = slashed_pool + jr["stake"] }
+  }
+
+  # Pay every majority-side juror their own stake back plus a
+  # proportional share of the slashed pool - each juror's bonus rounded
+  # independently, same real rounding-drift risk as LarzGig's split.
+  # Rather than reject a non-reconciling split outright (the right call
+  # for a 2-way split, too strict for N-way proportional distribution,
+  # which realistically never divides perfectly evenly), any leftover
+  # rounding dust goes to whichever majority juror staked the most -
+  # deterministic, and nobody's money is ever left unclaimed.
+  let largest_juror = nil
+  let largest_stake = -1.0
+  let distributed = 0.0
+  let payouts = {}
+  for j in keys(c["jurors"]) {
+    let jr = c["jurors"][j]
+    if jr["vote"] != majority_side { continue }
+    let bonus = majority_total_stake > 0.0 ? round(slashed_pool * (jr["stake"] / majority_total_stake), 2) : 0.0
+    let payout = round(jr["stake"] + bonus, 2)
+    payouts[j] = payout
+    distributed = distributed + payout
+    if jr["stake"] > largest_stake { largest_stake = jr["stake"]; largest_juror = j }
+  }
+  let dust = round(c["holding_balance"] - distributed, 2)
+  if largest_juror != nil and dust != 0.0 { payouts[largest_juror] = round(payouts[largest_juror] + dust, 2) }
+
+  for j in keys(payouts) {
+    wallet holding = moneyx.of(c["holding_balance"])
+    wallet juror_w = moneyx.of(balance(board, j))
+    escrow.release(moneyx.of(payouts[j]), holding, juror_w)
+    c["holding_balance"] = moneyx.to_float(holding.balance)
+    _set_balance(board, j, moneyx.to_float(juror_w.balance))
+  }
+
+  c["status"] = "resolved"
+  c["ruling"] = majority_side
+  return {"ok": true, "ruling": majority_side, "slashed_pool": slashed_pool}
+}
